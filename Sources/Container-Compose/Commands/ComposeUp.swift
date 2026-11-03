@@ -1180,6 +1180,7 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
             print("\(serviceName): \(output)".applyingColor(selectedColor))
         }
 
+        let stdinMode = ChildProcessRunner.Stdin(stdinOpen: service.stdin_open)
         var foregroundRunHandle: ForegroundRunHandle? = nil
         if detach {
             print("\nStarting service: \(serviceName)")
@@ -1188,6 +1189,7 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
             let exitCode = try await streamCommand(
                 "container",
                 args: ["run"] + runCommandArgs,
+                stdin: stdinMode,
                 onStdout: handleOutput,
                 onStderr: handleOutput
             )
@@ -1215,6 +1217,7 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
                     let exitCode = try await streamCommand(
                         "container",
                         args: ["run"] + runCommandArgs,
+                        stdin: stdinMode,
                         onStdout: handleOutput,
                         onStderr: handleOutput
                     )
@@ -1505,6 +1508,7 @@ extension ComposeUp {
     func streamCommand(
         _ command: String,
         args: [String] = [],
+        stdin: ChildProcessRunner.Stdin = .null,
         onStdout: @escaping (@Sendable (String) -> Void),
         onStderr: @escaping (@Sendable (String) -> Void)
     ) async throws -> Int32 {
@@ -1515,6 +1519,7 @@ extension ComposeUp {
             arguments: [command] + args,
             workingDirectory: URL(fileURLWithPath: cwd),
             environment: childEnvironment,
+            stdin: stdin,
             onStdout: onStdout,
             onStderr: onStderr
         )

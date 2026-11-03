@@ -46,6 +46,29 @@ struct SignalHandlingTests {
         #expect(registry.count() == 0)
     }
 
+    @Test("child with held-open stdin does not see EOF; null stdin does")
+    func heldOpenStdinKeepsInteractiveChildAlive() async throws {
+        // `cat` exits immediately on EOF. A service with `stdin_open: true` (e.g. CMD bash)
+        // must stay alive like under `docker compose up`, so stdin has to stay open.
+        for (mode, shouldStayAlive) in [(ChildProcessRunner.Stdin.heldOpen, true), (.null, false)] {
+            let registry = ActiveProcessRegistry()
+            let exit = Task {
+                try await ChildProcessRunner.run(
+                    executable: URL(fileURLWithPath: "/bin/cat"),
+                    arguments: [],
+                    stdin: mode,
+                    registry: registry,
+                    onStdout: { _ in }, onStderr: { _ in }
+                )
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+            #expect((registry.count() == 1) == shouldStayAlive, "mode \(mode)")
+            registry.signalAll(SIGTERM)
+            _ = try await exit.value
+            #expect(registry.count() == 0)
+        }
+    }
+
     @Test("fast-exiting children never leave stale PIDs tracked (PID-reuse safety)")
     func fastChildrenLeaveNoStalePids() async throws {
         let registry = ActiveProcessRegistry()
@@ -56,5 +79,11 @@ struct SignalHandlingTests {
             )
         }
         #expect(registry.count() == 0)
+    }
+    @Test("stdin mode follows stdin_open")
+    func stdinModeMapping() {
+        #expect(ChildProcessRunner.Stdin(stdinOpen: nil) == .null)
+        #expect(ChildProcessRunner.Stdin(stdinOpen: false) == .null)
+        #expect(ChildProcessRunner.Stdin(stdinOpen: true) == .heldOpen)
     }
 }

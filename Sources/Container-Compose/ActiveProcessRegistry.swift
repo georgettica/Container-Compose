@@ -16,17 +16,39 @@
 
 import Foundation
 
-/// Tracks child processes spawned by container-compose so an interrupt can signal them
-/// and verify they are gone. ``ChildProcessRunner`` is the
+/// Tracks child processes spawned by container-compose so an interrupt can signal them,
+/// close their held-open stdin, and verify they are gone. ``ChildProcessRunner`` is the
 /// only place that registers/unregisters, and always unregisters on exit.
 final class ActiveProcessRegistry: @unchecked Sendable {
     static let shared = ActiveProcessRegistry()
     private let lock = NSLock()
     private var activePids: Set<pid_t> = []
+    private var stdinClosers: [pid_t: () -> Void] = [:]
 
-    func register(_ pid: pid_t) { lock.withLock { _ = activePids.insert(pid) } }
+    /// - Parameter closeStdin: closes this child's held-open stdin, if it has one.
+    func register(_ pid: pid_t, closeStdin: (() -> Void)? = nil) {
+        lock.withLock {
+            activePids.insert(pid)
+            stdinClosers[pid] = closeStdin
+        }
+    }
 
-    func unregister(_ pid: pid_t) { lock.withLock { _ = activePids.remove(pid) } }
+    func unregister(_ pid: pid_t) {
+        lock.withLock {
+            activePids.remove(pid)
+            stdinClosers[pid] = nil
+        }
+    }
+
+    /// Closes every held-open child stdin: interactive children (`CMD bash`) see EOF and
+    /// exit on their own, the equivalent of Ctrl-D, long before a stop grace period ends.
+    func closeAllHeldStdin() {
+        let closers = lock.withLock { () -> [() -> Void] in
+            defer { stdinClosers = [:] }
+            return Array(stdinClosers.values)
+        }
+        closers.forEach { $0() }
+    }
 
     func signalAll(_ sig: Int32) {
         let pids = lock.withLock { activePids }

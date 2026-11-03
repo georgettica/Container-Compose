@@ -19,6 +19,22 @@ import Foundation
 /// Spawns a child process, streams its output, and tracks it in an
 /// ``ActiveProcessRegistry`` so interrupts can signal and verify it.
 enum ChildProcessRunner {
+    /// How the child's stdin is wired.
+    enum Stdin: Sendable {
+        /// `/dev/null`: the child sees EOF immediately (no `stdin_open`).
+        case null
+        /// An open pipe nothing ever writes to, closed when the child exits. Mirrors
+        /// `docker compose up` for `stdin_open: true`: an interactive image (`CMD bash`)
+        /// blocks on stdin instead of exiting on EOF. The host's own stdin and terminal
+        /// are never shared with the child.
+        case heldOpen
+
+        /// `stdin_open: true` services keep stdin open; everything else gets EOF.
+        init(stdinOpen: Bool?) {
+            self = stdinOpen == true ? .heldOpen : .null
+        }
+    }
+
     /// Runs `executable`, streams stdout/stderr through the closures, and returns
     /// the exit status once the process terminates.
     @discardableResult
@@ -27,6 +43,7 @@ enum ChildProcessRunner {
         arguments: [String],
         workingDirectory: URL? = nil,
         environment: [String: String]? = nil,
+        stdin: Stdin = .null,
         registry: ActiveProcessRegistry = .shared,
         onStdout: @escaping @Sendable (String) -> Void,
         onStderr: @escaping @Sendable (String) -> Void
@@ -41,7 +58,21 @@ enum ChildProcessRunner {
             process.currentDirectoryURL = workingDirectory
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
-            process.standardInput = FileHandle.nullDevice  // never share the host terminal
+            // `heldWriter` keeps the child's stdin open until closed; `childEnd` is our copy of
+            // the end the child inherits, which we must close after spawning or it leaks.
+            let heldWriter: FileHandle?
+            let childEnd: FileHandle?
+            switch stdin {
+            case .null:
+                heldWriter = nil
+                childEnd = nil
+                process.standardInput = FileHandle.nullDevice
+            case .heldOpen:
+                let pipe = Pipe()
+                heldWriter = pipe.fileHandleForWriting
+                childEnd = pipe.fileHandleForReading
+                process.standardInput = pipe
+            }
             if let environment { process.environment = environment }
 
             let stdoutHandle = stdoutPipe.fileHandleForReading
@@ -60,19 +91,26 @@ enum ChildProcessRunner {
             process.terminationHandler = { proc in
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                try? heldWriter?.close()  // no-op if already closed
                 registry.unregister(proc.processIdentifier)
                 continuation.resume(returning: proc.terminationStatus)
             }
 
             do {
                 try process.run()
-                registry.register(process.processIdentifier)
+                // The child owns the read end now; keeping ours open leaks one fd per child.
+                try? childEnd?.close()
+                registry.register(process.processIdentifier, closeStdin: heldWriter.map { writer in
+                    { try? writer.close() }
+                })
                 // A fast child can finish before register(): its termination handler already
                 // ran unregister(), so drop the entry we just added or it goes stale.
                 if !process.isRunning { registry.unregister(process.processIdentifier) }
             } catch {
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                try? childEnd?.close()
+                try? heldWriter?.close()
                 continuation.resume(throwing: error)
             }
         }
