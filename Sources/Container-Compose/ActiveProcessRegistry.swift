@@ -24,6 +24,13 @@ final class ActiveProcessRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var activePids: Set<pid_t> = []
     private var stdinClosers: [pid_t: () -> Void] = [:]
+    private var shuttingDown = false
+
+    /// Once set, ``ChildProcessRunner`` refuses to spawn: a child launched after the
+    /// interrupt began would never be signalled and would stall the shutdown.
+    var isShuttingDown: Bool { lock.withLock { shuttingDown } }
+
+    func beginShutdown() { lock.withLock { shuttingDown = true } }
 
     /// - Parameter closeStdin: closes this child's held-open stdin, if it has one.
     func register(_ pid: pid_t, closeStdin: (() -> Void)? = nil) {

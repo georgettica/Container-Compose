@@ -60,6 +60,8 @@ enum ChildProcessRunner {
         onStdout: @escaping @Sendable (String) -> Void,
         onStderr: @escaping @Sendable (String) -> Void
     ) async throws -> Int32 {
+        // Interrupted before launch: don't start anything the shutdown can't see.
+        if registry.isShuttingDown { throw CancellationError() }
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
@@ -125,6 +127,8 @@ enum ChildProcessRunner {
                 registry.register(process.processIdentifier, closeStdin: heldWriter.map { writer in
                     { try? writer.close() }
                 })
+                // Shutdown began between the check above and the spawn: reap it now.
+                if registry.isShuttingDown { kill(process.processIdentifier, SIGKILL) }
                 // A fast child can finish before register(): its termination handler already
                 // ran unregister(), so drop the entry we just added or it goes stale.
                 if !process.isRunning { registry.unregister(process.processIdentifier) }
