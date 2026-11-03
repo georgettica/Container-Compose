@@ -1137,7 +1137,9 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
             }
         }
 
-        // Add interactive and TTY flags
+        // Add interactive and TTY flags. With `-t -i`, `container run` puts its stdin in raw mode;
+        // `streamCommand` gives it a private pty (see `ChildProcessRunner.Stdin.pty`) so the host
+        // terminal stays untouched and Ctrl-C keeps reaching us.
         if service.stdin_open == true {
             runCommandArgs.append("-i")  // --interactive
         }
@@ -1180,7 +1182,7 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
             print("\(serviceName): \(output)".applyingColor(selectedColor))
         }
 
-        let stdinMode = ChildProcessRunner.Stdin(stdinOpen: service.stdin_open)
+        let stdinMode = ChildProcessRunner.Stdin(stdinOpen: service.stdin_open, tty: service.tty)
         var foregroundRunHandle: ForegroundRunHandle? = nil
         if detach {
             print("\nStarting service: \(serviceName)")

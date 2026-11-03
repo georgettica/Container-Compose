@@ -29,9 +29,21 @@ enum ChildProcessRunner {
         /// are never shared with the child.
         case heldOpen
 
-        /// `stdin_open: true` services keep stdin open; everything else gets EOF.
-        init(stdinOpen: Bool?) {
-            self = stdinOpen == true ? .heldOpen : .null
+        /// Like `heldOpen`, but the child's stdin is the slave side of a private pty, so the
+        /// child sees a real terminal. `container run -t -i` puts its stdin in raw mode, which
+        /// requires a tty; doing that on this pty (never the host terminal) keeps the host's
+        /// ISIG intact so Ctrl-C still reaches container-compose.
+        case pty
+
+        /// `stdin_open: true` services keep stdin open (on a pty when `tty: true`); everything
+        /// else gets EOF. `tty` without `stdin_open` needs no stdin: `container run -t` alone
+        /// never touches terminal modes.
+        init(stdinOpen: Bool?, tty: Bool?) {
+            switch (stdinOpen == true, tty == true) {
+            case (false, _): self = .null
+            case (true, false): self = .heldOpen
+            case (true, true): self = .pty
+            }
         }
     }
 
@@ -72,6 +84,16 @@ enum ChildProcessRunner {
                 heldWriter = pipe.fileHandleForWriting
                 childEnd = pipe.fileHandleForReading
                 process.standardInput = pipe
+            case .pty:
+                var master: Int32 = -1
+                var slave: Int32 = -1
+                guard openpty(&master, &slave, nil, nil, nil) == 0 else {
+                    continuation.resume(throwing: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO))
+                    return
+                }
+                heldWriter = FileHandle(fileDescriptor: master, closeOnDealloc: true)
+                childEnd = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
+                process.standardInput = childEnd
             }
             if let environment { process.environment = environment }
 
