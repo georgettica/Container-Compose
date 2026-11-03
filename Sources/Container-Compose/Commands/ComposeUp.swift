@@ -736,8 +736,12 @@ public struct ComposeUp: AsyncParsableCommand, @unchecked Sendable {
         process.arguments = ["container", "exec", containerID, "sh", "-c", cmd]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
-        do { try process.run() } catch { return }
+        do {
+            try process.run()
+            ActiveProcessRegistry.shared.register(process.processIdentifier)
+        } catch { return }
         process.waitUntilExit()
+        ActiveProcessRegistry.shared.unregister(process.processIdentifier)
     }
 
     private func createVolume(name volumeName: String, config volumeConfig: Volume) async throws {
@@ -1504,51 +1508,15 @@ extension ComposeUp {
         onStdout: @escaping (@Sendable (String) -> Void),
         onStderr: @escaping (@Sendable (String) -> Void)
     ) async throws -> Int32 {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [command] + args
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            var childEnvironment = ProcessInfo.processInfo.environment
-            childEnvironment["PATH"] = mergedExecutablePath(existing: childEnvironment["PATH"])
-            process.environment = childEnvironment
-
-            let stdoutHandle = stdoutPipe.fileHandleForReading
-            let stderrHandle = stderrPipe.fileHandleForReading
-
-            stdoutHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                if let string = String(data: data, encoding: .utf8) {
-                    onStdout(string)
-                }
-            }
-
-            stderrHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                if let string = String(data: data, encoding: .utf8) {
-                    onStderr(string)
-                }
-            }
-
-            process.terminationHandler = { proc in
-                stdoutHandle.readabilityHandler = nil
-                stderrHandle.readabilityHandler = nil
-                continuation.resume(returning: proc.terminationStatus)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+        var childEnvironment = ProcessInfo.processInfo.environment
+        childEnvironment["PATH"] = mergedExecutablePath(existing: childEnvironment["PATH"])
+        return try await ChildProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: [command] + args,
+            workingDirectory: URL(fileURLWithPath: cwd),
+            environment: childEnvironment,
+            onStdout: onStdout,
+            onStderr: onStderr
+        )
     }
 }
